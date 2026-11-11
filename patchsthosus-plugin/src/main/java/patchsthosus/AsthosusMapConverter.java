@@ -103,10 +103,13 @@ public final class AsthosusMapConverter {
     }
 
     /**
-     * Returns true if {@code map} is a raw Asthosus mod map (or already tagged by this plugin).
+     * Returns true if {@code map} is a raw Asthosus mod map (excluding ignored Trecara maps).
      */
     public static boolean isAsthosusMap(Map map) {
         if (map == null || !map.custom || map.file == null || !map.file.exists()) {
+            return false;
+        }
+        if (isTrecaraMap(map)) {
             return false;
         }
         if ("true".equals(map.tags.get(TAG_CONVERTED))) {
@@ -119,6 +122,23 @@ public final class AsthosusMapConverter {
             }
         }
         return peekContentHeaderHasAsthosus(map.file);
+    }
+
+    /**
+     * Returns true if {@code map} belongs to the ignored Trecara planet.
+     */
+    public static boolean isTrecaraMap(Map map) {
+        if (map == null) return false;
+        if (map.file != null && map.file.path().toLowerCase(Locale.ROOT).contains("trecara")) {
+            return true;
+        }
+        for (String key : new String[]{"rules", "sectorPreset", TAG_ORIG_PLANET}) {
+            String val = map.tags.get(key, "");
+            if (val != null && val.toLowerCase(Locale.ROOT).contains("trecara")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean containsAsthosus(String s) {

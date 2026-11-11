@@ -81,8 +81,10 @@ import json
 import os
 import random
 import re
+import struct
 import sys
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -779,11 +781,16 @@ class ConversionStats:
     mod_name: str = ""
     total_content_in: int = 0
     total_content_out: int = 0
+    ignored_content_files: int = 0
+    ignored_sprites: int = 0
     skipped_planet_sector_files: int = 0
     vanilla_overrides_patched: int = 0
     synthesized_icons: int = 0
     synthesized_outlines: int = 0
+    outlined_in_place_sprites: int = 0
     synthesized_treads: int = 0
+    synthesized_floor_edges: List[str] = field(default_factory=list)
+    vanilla_blendgroup_floors: List[Tuple[str, str]] = field(default_factory=list)
     converted_env_buildings: List[Tuple[str, str]] = field(default_factory=list)
     functional_static_walls_bypassed: List[str] = field(default_factory=list)
     evacuated_functional_sprites: int = 0
@@ -823,6 +830,7 @@ class ModToDataPatchConverter:
         convert_buildings: bool = True,
         building_privilege: str = "privileged",  # "privileged" | "unprivileged"
         atlas_preview_path: Optional[Path] = None,
+        ignore_planets: Optional[List[str]] = None,
     ):
         self.mod_dir = mod_dir.resolve()
         self.out_zip = out_zip.resolve()
@@ -831,18 +839,301 @@ class ModToDataPatchConverter:
         self.convert_buildings = convert_buildings
         self.building_privilege = building_privilege
         self.atlas_preview_path = atlas_preview_path.resolve() if atlas_preview_path else None
+        if ignore_planets is None:
+            self.ignore_planets: Set[str] = {"trecara"}
+        else:
+            self.ignore_planets = {
+                p.strip().lower() for p in ignore_planets if p.strip() and p.strip().lower() != "none"
+            }
 
         self.stats = ConversionStats(env_limit=env_limit, building_privilege=building_privilege)
         self.mod_name = self._detect_mod_name()
         self.stats.mod_name = self.mod_name
 
         self.custom_planets: Set[str] = set()
+        self.ignored_content_stems: Set[str] = set()
+        self.kept_content_stems: Set[str] = set()
+        self.used_vanilla_floors_on_maps: Set[str] = set()
+        self.liquid_adjacent_floors_on_maps: Dict[str, int] = {}
         self.sound_stems: Set[str] = set()
         self.music_stems: Set[str] = set()
         self.sprites_by_stem: Dict[str, SpriteRecord] = {}
         self.content_records: List[ContentRecord] = []
         self.vanilla_patches: Dict[str, Any] = {}
         self.client_scale_patches: Dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Step 0: Ignored Planet (e.g. Trecara) & Map Usage Discovery
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _decode_msav_floor_and_block_usage(msav_path: Path, mod_prefix: str) -> Tuple[int, int, List[str], Set[str], Set[str]]:
+        """
+        Decodes the placed floor grid and placed block set of a Mindustry `.msav` map
+        (SaveVersion 4..13+) without loading global unused content-header entries.
+        Returns `(w, h, floor_grid, mod_stems_used, vanilla_floors_used)`.
+        """
+        raw = zlib.decompress(msav_path.read_bytes())
+        bio = io.BytesIO(raw)
+        if bio.read(4) != b"MSAV":
+            return 0, 0, [], set(), set()
+        ver = struct.unpack(">i", bio.read(4))[0]
+        mlen = struct.unpack(">i", bio.read(4))[0]
+        bio.read(mlen)
+        if ver >= 12:
+            bio.read(struct.unpack(">i", bio.read(4))[0])
+        clen = struct.unpack(">i", bio.read(4))[0]
+        cbytes = io.BytesIO(bio.read(clen))
+        mapped = cbytes.read(1)[0]
+        block_table: List[str] = []
+        for _ in range(mapped):
+            ctype = cbytes.read(1)[0]
+            total = struct.unpack(">h", cbytes.read(2))[0]
+            arr = [
+                cbytes.read(struct.unpack(">H", cbytes.read(2))[0]).decode("utf-8", errors="replace")
+                for _ in range(total)
+            ]
+            if ctype == 1:
+                block_table = arr
+        if ver == 11:
+            bio.read(struct.unpack(">i", bio.read(4))[0])
+        maplen = struct.unpack(">i", bio.read(4))[0]
+        mb = io.BytesIO(bio.read(maplen))
+        w, h = struct.unpack(">HH", mb.read(4))
+        total_tiles = w * h
+        floor_grid = [""] * total_tiles
+        used_names: Set[str] = set()
+        vanilla_floors: Set[str] = set()
+
+        i = 0
+        while i < total_tiles:
+            fl_id, ov_id = struct.unpack(">hh", mb.read(4))
+            consec = mb.read(1)[0]
+            fl_name = block_table[fl_id] if 0 <= fl_id < len(block_table) else ""
+            ov_name = block_table[ov_id] if 0 <= ov_id < len(block_table) else ""
+            if fl_name:
+                used_names.add(fl_name)
+                if not fl_name.startswith(mod_prefix):
+                    vanilla_floors.add(fl_name)
+            if ov_name:
+                used_names.add(ov_name)
+            end = min(total_tiles, i + 1 + consec)
+            for k in range(i, end):
+                floor_grid[k] = fl_name
+            i += 1 + consec
+
+        i = 0
+        while i < total_tiles:
+            bl_id = struct.unpack(">h", mb.read(2))[0]
+            packed = mb.read(1)[0]
+            had_entity = (packed & 1) != 0
+            had_data = (packed & 2) != 0
+            newdata = (packed & 4) != 0 if ver >= 8 else False
+            if newdata:
+                mb.read(7)
+            elif had_data:
+                mb.read(1)
+            if had_entity:
+                is_center = mb.read(1)[0] != 0
+                if is_center:
+                    chunk_len = struct.unpack(">i", mb.read(4))[0] if ver >= 10 else struct.unpack(">H", mb.read(2))[0]
+                    mb.read(chunk_len)
+            if not had_entity and not had_data and not newdata:
+                consec = mb.read(1)[0]
+                i += consec
+            if 0 <= bl_id < len(block_table):
+                used_names.add(block_table[bl_id])
+            i += 1
+
+        mod_stems = {n[len(mod_prefix):] for n in used_names if n.startswith(mod_prefix)}
+        return w, h, floor_grid, mod_stems, vanilla_floors
+
+    def _discover_ignored_content_and_maps(self) -> None:
+        content_root = self.mod_dir / "content"
+        mod_prefix = self.mod_name + "-"
+        all_files: Dict[str, Tuple[Path, Dict[str, Any], str]] = {}
+        liquid_floor_names: Set[str] = {
+            "water", "deep-water", "tainted-water", "deep-tainted-water",
+            "darksand-tainted-water", "sand-water", "darksand-water",
+            "tar", "slag", "molten-slag", "cryofluid", "pooled-cryofluid", "arkycite-floor",
+        }
+
+        if content_root.is_dir():
+            # Seed ignored roots from ignored planet definitions (e.g. `content/planets/trecara.hjson`)
+            for pdir_name in ("planets", "planet"):
+                pdir = content_root / pdir_name
+                if pdir.is_dir():
+                    for pf in sorted(pdir.rglob("*")):
+                        if pf.is_file() and pf.suffix.lower() in (".hjson", ".json", ".json5"):
+                            if pf.stem.lower() in self.ignore_planets:
+                                self.ignored_content_stems.add(pf.stem)
+                                pd = parse_hjson_file(pf)
+                                if isinstance(pd, dict) and isinstance(pd.get("defaultCore"), str):
+                                    dc = pd["defaultCore"].strip()
+                                    if dc.startswith(mod_prefix):
+                                        dc = dc[len(mod_prefix):]
+                                    self.ignored_content_stems.add(dc)
+
+            for sub in sorted(content_root.iterdir(), key=lambda x: x.name):
+                if not sub.is_dir() or sub.name.lower() not in CONTENT_FOLDER_MAP:
+                    continue
+                for f in sorted(sub.rglob("*")):
+                    if not f.is_file() or f.suffix.lower() not in (".hjson", ".json", ".json5"):
+                        continue
+                    raw_txt = f.read_text(encoding="utf-8", errors="replace")
+                    parsed = parse_hjson_file(f)
+                    if not isinstance(parsed, dict):
+                        continue
+                    stem = f.stem
+                    all_files[stem] = (f, parsed, raw_txt)
+
+                    if parsed.get("isLiquid") is True or str(parsed.get("cacheLayer", "normal")) not in ("normal", "walls"):
+                        liquid_floor_names.add(mod_prefix + stem)
+
+                    if not self.ignore_planets:
+                        continue
+                    rel_parts = {pt.lower() for pt in f.relative_to(content_root).parts[:-1]}
+                    if rel_parts & self.ignore_planets:
+                        self.ignored_content_stems.add(stem)
+                        continue
+                    shown = parsed.get("shownPlanets")
+                    if shown:
+                        plist = shown if isinstance(shown, list) else [shown]
+                        norm_p = {
+                            (str(x)[len(mod_prefix):] if str(x).startswith(mod_prefix) else str(x)).lower()
+                            for x in plist
+                        }
+                        if norm_p and norm_p <= self.ignore_planets:
+                            self.ignored_content_stems.add(stem)
+
+            # Propagate exclusion along `research`, `itemDrop`, and `liquidDrop` links
+            if self.ignore_planets:
+                changed = True
+                while changed:
+                    changed = False
+                    for stem, (_f, d, _txt) in all_files.items():
+                        if stem in self.ignored_content_stems:
+                            continue
+                        refs: List[str] = []
+                        res = d.get("research")
+                        if isinstance(res, str):
+                            refs.append(res)
+                        elif isinstance(res, dict):
+                            for rk in ("parent", "root"):
+                                if isinstance(res.get(rk), str):
+                                    refs.append(res[rk])
+                        for dk in ("itemDrop", "liquidDrop"):
+                            if isinstance(d.get(dk), str):
+                                refs.append(d[dk])
+                        norm_refs = {
+                            r[len(mod_prefix):] if r.startswith(mod_prefix) else r
+                            for r in refs
+                        }
+                        if norm_refs & self.ignored_content_stems:
+                            self.ignored_content_stems.add(stem)
+                            changed = True
+
+        # Scan `.msav` maps if present to (a) exclude environment blocks used exclusively
+        # on ignored-planet test maps (e.g. `21u-00-trecara-test.msav`) and (b) measure
+        # exact shoreline liquid adjacencies and placed vanilla floors on active maps.
+        maps_dir = self.mod_dir / "maps"
+        ignored_map_stems: Set[str] = set()
+        kept_map_stems: Set[str] = set()
+        if maps_dir.is_dir():
+            for mp in sorted(maps_dir.rglob("*.msav")):
+                if not mp.is_file():
+                    continue
+                is_ignored_map = bool(self.ignore_planets) and any(
+                    ip in mp.name.lower() for ip in self.ignore_planets
+                )
+                try:
+                    w, h, fgrid, used_stems, vfloors = self._decode_msav_floor_and_block_usage(mp, mod_prefix)
+                except Exception:
+                    continue
+                if is_ignored_map:
+                    ignored_map_stems |= used_stems
+                else:
+                    kept_map_stems |= used_stems
+                    self.used_vanilla_floors_on_maps |= vfloors
+                    if w > 0 and h > 0:
+                        for idx, fl in enumerate(fgrid):
+                            if fl not in liquid_floor_names:
+                                continue
+                            x, y = idx // h, idx % h
+                            for dx in (-1, 0, 1):
+                                for dy in (-1, 0, 1):
+                                    if dx == 0 and dy == 0:
+                                        continue
+                                    nx, ny = x + dx, y + dy
+                                    if 0 <= nx < w and 0 <= ny < h:
+                                        nb = fgrid[nx * h + ny]
+                                        if nb != fl and nb.startswith(mod_prefix) and nb not in liquid_floor_names:
+                                            nb_stem = nb[len(mod_prefix):]
+                                            self.liquid_adjacent_floors_on_maps[nb_stem] = (
+                                                self.liquid_adjacent_floors_on_maps.get(nb_stem, 0) + 1
+                                            )
+
+        if self.ignore_planets and ignored_map_stems:
+            env_candidates = {
+                stem for stem, (f, _d, _txt) in all_files.items()
+                if "environment" in {pt.lower() for pt in f.parts}
+                and stem not in self.ignored_content_stems
+                and stem not in kept_map_stems
+            }
+            # Iteratively exclude env blocks placed on ignored-planet maps (plus their
+            # companion `<floor>-boulder` / `<floor>-wall`) if unreferenced by kept content.
+            changed = True
+            while changed:
+                changed = False
+                kept_blob = "\n".join(
+                    txt for s, (_f, _d, txt) in all_files.items()
+                    if s not in self.ignored_content_stems and s not in env_candidates
+                )
+                for stem in sorted(list(env_candidates)):
+                    if stem in self.ignored_content_stems:
+                        continue
+                    on_ignored = stem in ignored_map_stems
+                    companion_of_ignored = any(
+                        stem == f"{ig}-boulder" or stem == f"{ig}-wall"
+                        for ig in self.ignored_content_stems
+                    )
+                    if not (on_ignored or companion_of_ignored):
+                        continue
+                    # Also ensure no already-kept env block references `stem`
+                    other_kept_env_blob = "\n".join(
+                        all_files[s][2]
+                        for s in all_files
+                        if s != stem and s not in self.ignored_content_stems and (s in kept_map_stems)
+                    )
+                    pat = re.compile(rf"(?<![A-Za-z0-9_-])(?:{re.escape(mod_prefix)})?{re.escape(stem)}(?![A-Za-z0-9_-])")
+                    if not pat.search(kept_blob) and not pat.search(other_kept_env_blob):
+                        self.ignored_content_stems.add(stem)
+                        changed = True
+
+        self.kept_content_stems = set(all_files.keys()) - self.ignored_content_stems
+
+    def _is_ignored_sprite(self, stem: str, rel_path: str) -> bool:
+        if not self.ignore_planets:
+            return False
+        rel_parts = {pt.lower() for pt in Path(rel_path).parts[:-1]}
+        if rel_parts & self.ignore_planets:
+            return True
+        if not self.ignored_content_stems:
+            return False
+        # Match longest content stem owner (kept vs ignored) so shared prefixes never misfire
+        best_len = -1
+        best_is_ignored = False
+        for cstem in self.ignored_content_stems:
+            if stem == cstem or stem.startswith(cstem + "-") or (stem.startswith(cstem) and stem[len(cstem):].isdigit()):
+                if len(cstem) > best_len:
+                    best_len = len(cstem)
+                    best_is_ignored = True
+        for kstem in self.kept_content_stems:
+            if stem == kstem or stem.startswith(kstem + "-") or (stem.startswith(kstem) and stem[len(kstem):].isdigit()):
+                if len(kstem) >= best_len:
+                    best_len = len(kstem)
+                    best_is_ignored = False
+        return best_is_ignored
 
     # ------------------------------------------------------------------
     # Step 1: Mod Metadata, Audio Stems, Sprites Discovery
@@ -888,6 +1179,10 @@ class ModToDataPatchConverter:
                 if stem.startswith(self.mod_name + "-"):
                     stem = stem[len(self.mod_name) + 1:]
                     rel = str(Path(rel).with_name(stem + ".png")).replace("\\", "/")
+
+                if self._is_ignored_sprite(stem, rel):
+                    self.stats.ignored_sprites += 1
+                    continue
 
                 raw_bytes = p.read_bytes()
                 with Image.open(io.BytesIO(raw_bytes)) as im:
@@ -969,6 +1264,9 @@ class ModToDataPatchConverter:
                     continue
 
                 stem = f.stem
+                if stem in self.ignored_content_stems:
+                    self.stats.ignored_content_files += 1
+                    continue
                 rel_sub = f.relative_to(sub).with_suffix(".json").as_posix()
 
                 # Detect vanilla override files (no `type`/`template` + matches vanilla item/liquid/status)
@@ -1246,15 +1544,6 @@ class ModToDataPatchConverter:
                     rec.cache_layer_bypassed = True
                     self.stats.functional_static_walls_bypassed.append(rec.stem)
 
-            elif rec.orig_type == "Floor" and self.hard_bypass_mode != "buildings-only":
-                # Layer 4a: Prevent Mindustry's upstream `regenerateContentSprites` bug where
-                # `Floor.createIcons` writes `generated/<hash>/<floor>-edge.png` onto `patchAtlas`,
-                # causing `FloorRenderBatch` to draw magenta `env-error` borders around every floor!
-                edge_sp = self.sprites_by_stem.get(f"{rec.stem}-edge")
-                has_env_edge = edge_sp is not None and "blocks/environment/" in edge_sp.orig_rel_path
-                if not has_env_edge and "drawEdgeOut" not in rec.data:
-                    rec.data["drawEdgeOut"] = False
-
         # ---- Map Every Sprite Currently in `blocks/environment/` to Its Owner Block ----
         # Determine exact set of sprite stems that MUST stay on `FloorRenderer.texture` (`data-patch-reserved-env`)
         required_env_stems: Dict[str, Tuple[ContentRecord, str]] = {}  # sprite_stem -> (owner_rec, role)
@@ -1330,31 +1619,36 @@ class ModToDataPatchConverter:
         # Trimming byte-identical trailing RGBA variants saves thousands of `500x500` pixels with ZERO art loss!
         self._deduplicate_identical_env_variants(block_records)
 
-        # ---- Layer 5b: Symmetric Center-Anchored Alpha Cropping on SteamVent / OverlayFloor / OreBlock ----
+        # ---- Layer 5b: Symmetric Center-Anchored Alpha Cropping on OverlayFloor / OreBlock / Large SteamVent ----
+        # Never crop 32x32 liquid geyser SteamVents or Floor `-edge` sprites (`Floor.load` requires 96x96).
         for sp_stem, (owner_rec, btype) in list(required_env_stems.items()):
-            if btype in ("SteamVent", "OverlayFloor", "OreBlock"):
+            if sp_stem.endswith("-edge"):
+                continue
+            if btype in ("OverlayFloor", "OreBlock") or (btype == "SteamVent" and self.sprites_by_stem[sp_stem].width > 32):
                 sp = self.sprites_by_stem[sp_stem]
                 if "blocks/environment/" in sp.dest_rel_path:
                     self._symmetric_center_crop(sp)
 
-        # Check if Layers 1-5 already fit inside a single `env_limit x env_limit` page!
-        _, pk = self._pack_current_env_sprites()
-        if len(pk.pages) <= 1:
-            self._finalize_env_pack_order(interleave_barriers=True)
-            return
-
-        # ---- Layer 6 & Layer 7: Escalating Hard Compression Until `pages <= 1` ----
+        # ---- Layer 6 & Layer 7: Synthesize Liquid/Shoreline Edges & Fit `pages <= 1` ----
         if self.hard_bypass_mode == "scale-first":
-            self._apply_scale_downsampling_until_fit(block_records)
+            self._ensure_floor_and_liquid_edges(block_records, allow_variant_trim_for_land_edges=False)
+            _, pk = self._pack_current_env_sprites()
+            if len(pk.pages) > 1:
+                self._apply_scale_downsampling_until_fit(block_records)
             _, pk = self._pack_current_env_sprites()
             if len(pk.pages) > 1:
                 self._trim_vent_variants_until_fit(block_records)
                 self._trim_floor_variants_until_fit(block_records)
         else:
-            # Default "auto": preserve 100% crisp 1:1 native pixel art first by
-            # consolidating redundant SteamVent variants (2 -> 1) and excess Floor
-            # variants; use `TextureRegion.scale` downsampling if still > 1 page!
-            self._trim_vent_variants_until_fit(block_records)
+            # Default "auto": synthesize 96x96 `-edge.png` for all custom liquid floors,
+            # consolidate redundant variants if needed to fit 1 page, pack as many custom
+            # shoreline land `-edge.png`s as fit inside 500x500 (preserving >=2 floor variants),
+            # and assign 1-to-1 color-matched vanilla `blendGroup`s to remaining land floors
+            # so 100% of liquid and shoreline borders render cleanly without broken cutoffs!
+            self._ensure_floor_and_liquid_edges(block_records, allow_variant_trim_for_land_edges=True)
+            _, pk = self._pack_current_env_sprites()
+            if len(pk.pages) > 1:
+                self._trim_vent_variants_until_fit(block_records)
             _, pk = self._pack_current_env_sprites()
             if len(pk.pages) > 1:
                 self._trim_floor_variants_until_fit(block_records)
@@ -1363,6 +1657,313 @@ class ModToDataPatchConverter:
                 self._apply_scale_downsampling_until_fit(block_records)
 
         self._finalize_env_pack_order(interleave_barriers=True)
+
+    def _make_floor_edge_image(self, tile_im: Image.Image) -> Optional[Image.Image]:
+        """
+        Exact port of `Floor.createIcons(MultiPacker)` (`Floor.java` lines 235..244):
+        tiles `tile_im` (`32x32`) across `96x96` and multiplies RGBA channel-wise
+        with Mindustry's `edge-stencil.png` (`Color.muli`).
+        """
+        b64 = self._VANILLA_HELPER_PNGS_B64.get("edge-stencil")
+        if not b64:
+            return None
+        stencil = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
+        tile = tile_im.convert("RGBA")
+        if tile.width <= 0 or tile.height <= 0:
+            return None
+        tiled = Image.new("RGBA", stencil.size)
+        for y in range(0, stencil.height, tile.height):
+            for x in range(0, stencil.width, tile.width):
+                tiled.paste(tile, (x, y))
+        return ImageChops.multiply(stencil, tiled)
+
+    @staticmethod
+    def _mean_rgb(im: Image.Image) -> Tuple[float, float, float]:
+        rgb = im.convert("RGB")
+        raw = rgb.tobytes()
+        n = max(1, len(raw) // 3)
+        return (
+            sum(raw[0::3]) / n,
+            sum(raw[1::3]) / n,
+            sum(raw[2::3]) / n,
+        )
+
+    def _register_env_edge_sprite(self, floor_stem: str, edge_im: Image.Image) -> SpriteRecord:
+        rgba = edge_im.convert("RGBA")
+        buf = io.BytesIO()
+        rgba.save(buf, format="PNG", optimize=True)
+        out_bytes = buf.getvalue()
+        edge_stem = f"{floor_stem}-edge"
+        rel = f"blocks/environment/{edge_stem}.png"
+        sp = SpriteRecord(
+            stem=edge_stem,
+            orig_rel_path=rel,
+            abs_path=self.mod_dir / "sprites" / rel,
+            width=rgba.width,
+            height=rgba.height,
+            png_bytes=out_bytes,
+            rgba_md5=hashlib.md5(rgba.tobytes()).hexdigest(),
+            dest_rel_path=rel,
+        )
+        self.sprites_by_stem[edge_stem] = sp
+        return sp
+
+    def _ensure_floor_and_liquid_edges(
+        self,
+        block_records: Dict[str, ContentRecord],
+        allow_variant_trim_for_land_edges: bool = True,
+    ) -> None:
+        """
+        Ensures every liquid tile and shoreline floor has non-null `edges` on
+        `PageType.environment` (`FloorRenderer.texture`) without overflowing `500x500`:
+          1. All custom liquid `Floor`s (`isLiquid: true` or non-normal `cacheLayer`)
+             receive genuine `96x96` `<floor>-edge.png` sprites on `data-patch-reserved-env`.
+          2. High-priority shoreline land `Floor`s (largest RGB distance from vanilla
+             floors / active liquid borders on maps) also receive custom `96x96`
+             `<floor>-edge.png` sprites while keeping `pages <= 1` and `variants >= 2`.
+          3. Remaining land `Floor`s without room for a `96x96` `-edge.png` receive
+             a 1-to-1 distinct closest-RGB vanilla `Floor` `blendGroup` (whose `-edge`
+             already lives on the exact same base `PageType.environment` GL texture at
+             zero `500x500` pixel cost), and `SteamVent` `parent`/`blendGroup` links
+             are synchronized so vents blend seamlessly with their parent floors and
+             adjacent liquids.
+        """
+        orig_floor_variants: Dict[str, int] = {
+            r.stem: int(r.data.get("variants", 3))
+            for r in block_records.values()
+            if r.orig_type in ("Floor", "ShallowLiquid", "OverlayFloor", "OreBlock")
+            and not r.converted_to_building
+            and not r.data.get("autotile")
+        }
+        orig_vent_variants: Dict[str, int] = {
+            r.stem: int(r.data.get("variants", 2))
+            for r in block_records.values()
+            if r.orig_type == "SteamVent" and not r.converted_to_building
+        }
+
+        floor_candidates: List[ContentRecord] = []
+        for rec in sorted(block_records.values(), key=lambda x: x.stem):
+            if rec.converted_to_building or rec.orig_type not in ("Floor", "ShallowLiquid"):
+                continue
+            if rec.data.get("autotile") is True:
+                continue
+            if rec.data.get("drawEdgeOut") is False:
+                continue
+            bg = rec.data.get("blendGroup")
+            if isinstance(bg, str) and bg.strip() and bg.strip() not in (rec.stem, f"dp-{rec.stem}", f"{self.mod_name}-{rec.stem}"):
+                continue
+            existing_edge = self.sprites_by_stem.get(f"{rec.stem}-edge")
+            if existing_edge is not None and "blocks/environment/" in existing_edge.dest_rel_path:
+                continue
+            floor_candidates.append(rec)
+
+        liquid_floors: List[ContentRecord] = []
+        land_floors: List[ContentRecord] = []
+        floor_tile_ims: Dict[str, Image.Image] = {}
+        floor_rgbs: Dict[str, Tuple[float, float, float]] = {}
+
+        for rec in floor_candidates:
+            sp0 = self.sprites_by_stem.get(f"{rec.stem}1") or self.sprites_by_stem.get(rec.stem)
+            if sp0 is None:
+                continue
+            with Image.open(io.BytesIO(sp0.png_bytes)) as im:
+                rgba = im.convert("RGBA")
+            floor_tile_ims[rec.stem] = rgba
+            floor_rgbs[rec.stem] = self._mean_rgb(rgba)
+            is_liq = bool(rec.data.get("isLiquid", False)) or str(rec.data.get("cacheLayer", "normal")) not in ("normal", "walls")
+            if is_liq:
+                liquid_floors.append(rec)
+            else:
+                land_floors.append(rec)
+
+        # 1. Mandatory custom 96x96 `-edge.png` for all custom liquid floors
+        for rec in liquid_floors:
+            edge_im = self._make_floor_edge_image(floor_tile_ims[rec.stem])
+            if edge_im is not None:
+                self._register_env_edge_sprite(rec.stem, edge_im)
+                self.stats.synthesized_floor_edges.append(rec.stem)
+
+        # Trim vents / floors if needed so base tiles + all liquid `-edge.png`s fit 1 page
+        _, pk = self._pack_current_env_sprites()
+        if len(pk.pages) > 1 and self.hard_bypass_mode != "scale-first":
+            self._trim_vent_variants_until_fit(block_records)
+            _, pk = self._pack_current_env_sprites()
+            if len(pk.pages) > 1:
+                self._trim_floor_variants_until_fit(block_records)
+
+        # Available vanilla floors for 1-to-1 `blendGroup` fallback (exclude any placed on maps)
+        avail_vanilla: Dict[str, Tuple[float, float, float]] = {
+            vname: vrgb
+            for vname, vrgb in self._VANILLA_FLOOR_RGB.items()
+            if vname not in self.used_vanilla_floors_on_maps
+        }
+
+        def best_vanilla_dist(stem: str) -> float:
+            r, g, b = floor_rgbs[stem]
+            if not avail_vanilla:
+                return 999.0
+            return min(
+                ((r - vr) ** 2 + (g - vg) ** 2 + (b - vb) ** 2) ** 0.5
+                for vr, vg, vb in avail_vanilla.values()
+            )
+
+        # 2. Greedily add custom 96x96 `-edge.png`s for shoreline land floors in priority order:
+        #    prioritize floors that actually border liquids on maps (if map data exists),
+        #    then largest RGB distance from any vanilla floor!
+        has_map_adj_data = bool(self.liquid_adjacent_floors_on_maps)
+        land_sorted = sorted(
+            land_floors,
+            key=lambda r: (
+                0 if (not has_map_adj_data or self.liquid_adjacent_floors_on_maps.get(r.stem, 0) > 0) else 1,
+                -best_vanilla_dist(r.stem),
+                -self.liquid_adjacent_floors_on_maps.get(r.stem, 0),
+                r.stem,
+            ),
+        )
+
+        custom_edged_stems: Set[str] = {r.stem for r in liquid_floors if f"{r.stem}-edge" in self.sprites_by_stem}
+
+        for rec in land_sorted:
+            edge_im = self._make_floor_edge_image(floor_tile_ims[rec.stem])
+            if edge_im is None:
+                continue
+
+            # Snapshot variant state so we can roll back cleanly if `rec-edge` cannot fit
+            snap_variants = {
+                r.stem: r.data.get("variants")
+                for r in block_records.values()
+                if r.orig_type in FLOOR_OVERLAY_TYPES and not r.converted_to_building
+            }
+            snap_dest = {
+                sp.stem: sp.dest_rel_path
+                for sp in self.sprites_by_stem.values()
+            }
+
+            self._register_env_edge_sprite(rec.stem, edge_im)
+            _, pk = self._pack_current_env_sprites()
+
+            if len(pk.pages) > 1 and allow_variant_trim_for_land_edges:
+                # Consolidate >=64px SteamVents (2 -> 1) first, then >2-variant Floors/Overlays down to min 2
+                large_vents = [
+                    v for v in sorted(block_records.values(), key=lambda x: x.stem)
+                    if v.orig_type == "SteamVent"
+                    and not v.converted_to_building
+                    and int(v.data.get("variants", 2)) > 1
+                    and (self.sprites_by_stem.get(f"{v.stem}1") is not None and self.sprites_by_stem[f"{v.stem}1"].width >= 64)
+                ]
+                for v in large_vents:
+                    if len(pk.pages) <= 1:
+                        break
+                    while int(v.data.get("variants", 2)) > 1:
+                        cv = int(v.data.get("variants", 2))
+                        dsp = self.sprites_by_stem.get(f"{v.stem}{cv}")
+                        v.data["variants"] = cv - 1
+                        if dsp and "blocks/environment/" in dsp.dest_rel_path:
+                            dsp.dest_rel_path = f"blocks/env-trimmed/{dsp.stem}.png"
+                        _, pk = self._pack_current_env_sprites()
+                        if len(pk.pages) <= 1:
+                            break
+
+                while len(pk.pages) > 1:
+                    reducibles = [
+                        f for f in block_records.values()
+                        if f.orig_type in ("Floor", "ShallowLiquid", "OverlayFloor", "OreBlock")
+                        and not f.converted_to_building
+                        and not f.data.get("autotile")
+                        and int(f.data.get("variants", 3)) > 2
+                    ]
+                    if not reducibles:
+                        break
+                    reducibles.sort(
+                        key=lambda f: (
+                            -int(f.data.get("variants", 3)),
+                            -(self.sprites_by_stem[f"{f.stem}1"].width * self.sprites_by_stem[f"{f.stem}1"].height)
+                            if f"{f.stem}1" in self.sprites_by_stem else 0,
+                            f.stem,
+                        )
+                    )
+                    tgt = reducibles[0]
+                    cv = int(tgt.data.get("variants", 3))
+                    dsp = self.sprites_by_stem.get(f"{tgt.stem}{cv}")
+                    tgt.data["variants"] = cv - 1
+                    if dsp and "blocks/environment/" in dsp.dest_rel_path:
+                        dsp.dest_rel_path = f"blocks/env-trimmed/{dsp.stem}.png"
+                    _, pk = self._pack_current_env_sprites()
+
+            if len(pk.pages) <= 1:
+                custom_edged_stems.add(rec.stem)
+                self.stats.synthesized_floor_edges.append(rec.stem)
+            else:
+                # Roll back this optional land `-edge.png` and restore variant state
+                del self.sprites_by_stem[f"{rec.stem}-edge"]
+                for bstem, old_val in snap_variants.items():
+                    if old_val is None:
+                        block_records[bstem].data.pop("variants", None)
+                    else:
+                        block_records[bstem].data["variants"] = old_val
+                for sstem, old_rel in snap_dest.items():
+                    if sstem in self.sprites_by_stem:
+                        self.sprites_by_stem[sstem].dest_rel_path = old_rel
+
+        # Refresh trim stats cleanly (avoid duplicate entries)
+        self.stats.trimmed_vent_variants = [
+            (st, old_v, int(block_records[st].data.get("variants", old_v)))
+            for st, old_v in sorted(orig_vent_variants.items())
+            if int(block_records[st].data.get("variants", old_v)) != old_v
+        ]
+        self.stats.trimmed_floor_variants = [
+            (st, old_v, int(block_records[st].data.get("variants", old_v)))
+            for st, old_v in sorted(orig_floor_variants.items())
+            if int(block_records[st].data.get("variants", old_v)) != old_v
+        ]
+
+        # 3. Assign 1-to-1 distinct closest-RGB vanilla `blendGroup` to remaining land floors
+        effective_blend_group: Dict[str, str] = {st: f"dp-{st}" for st in custom_edged_stems}
+        remaining_land = [r for r in land_floors if r.stem not in custom_edged_stems]
+        # Assign most constrained / highest liquid-adjacency floors first so they get their #1 match
+        remaining_land.sort(
+            key=lambda r: (-self.liquid_adjacent_floors_on_maps.get(r.stem, 0), -best_vanilla_dist(r.stem), r.stem)
+        )
+        used_vanilla_bg: Set[str] = set()
+        for rec in remaining_land:
+            r, g, b = floor_rgbs[rec.stem]
+            choices = sorted(
+                (
+                    ((r - vr) ** 2 + (g - vg) ** 2 + (b - vb) ** 2) ** 0.5,
+                    vname,
+                )
+                for vname, (vr, vg, vb) in avail_vanilla.items()
+                if vname not in used_vanilla_bg
+            )
+            if not choices:
+                continue
+            _dist, chosen_v = choices[0]
+            used_vanilla_bg.add(chosen_v)
+            rec.data["blendGroup"] = chosen_v
+            effective_blend_group[rec.stem] = chosen_v
+            self.stats.vanilla_blendgroup_floors.append((rec.stem, chosen_v))
+
+        # 4. Synchronize `parent` and one-hop `blendGroup` on SteamVents / child Floors
+        for rec in sorted(block_records.values(), key=lambda x: x.stem):
+            if rec.converted_to_building or rec.orig_type not in FLOOR_OVERLAY_TYPES:
+                continue
+            for fk in ("parent", "blendGroup"):
+                val = rec.data.get(fk)
+                if not isinstance(val, str) or not val.strip():
+                    continue
+                norm = val.strip()
+                if norm.startswith("dp-"):
+                    norm = norm[3:]
+                elif norm.startswith(self.mod_name + "-"):
+                    norm = norm[len(self.mod_name) + 1:]
+                if norm in block_records:
+                    if fk == "parent":
+                        rec.data["parent"] = f"dp-{norm}"
+                    elif fk == "blendGroup":
+                        # Point directly to the effective blendGroup owner (one hop!)
+                        # so `Floor.edges(x, y)` (`blendGroup.asFloor().edges`) is non-null
+                        # AND `vent.blendId == parent_floor.blendId`!
+                        rec.data["blendGroup"] = effective_blend_group.get(norm, f"dp-{norm}")
 
     def _deduplicate_identical_env_variants(self, block_records: Dict[str, ContentRecord]) -> None:
         """
@@ -1715,20 +2316,59 @@ class ModToDataPatchConverter:
     def _rewrite_bundle_text(self, text: str) -> str:
         """
         Rewrites `<ctype>.<modname>-<id>.<prop>` -> `<ctype>.dp-<id>.<prop>` in
-        Java `.properties` files while preserving comments and custom keys.
+        Java `.properties` files while preserving comments and custom keys and
+        omitting entries belonging to ignored planets/content (`ignored_content_stems`).
         """
         lines_out: List[str] = []
         pattern = re.compile(
             rf"^(\s*(?:block|item|liquid|unit|status|weather)\.){re.escape(self.mod_name)}-([A-Za-z0-9_-]+)(\.[A-Za-z0-9_.-]+\s*[=:])"
         )
+        planet_sec_pattern = re.compile(
+            rf"^\s*(?:planet|sector)\.{re.escape(self.mod_name)}-([A-Za-z0-9_-]+)\."
+        )
         for line in text.splitlines():
-            # Skip planet/sector bundle keys only? Keeping them is harmless in Core.bundle,
-            # while rewriting supported content keys makes all localized names/descriptions work!
+            m_ps = planet_sec_pattern.match(line)
+            if m_ps and any(ig in m_ps.group(1).lower() for ig in self.ignore_planets):
+                continue
+            m = pattern.match(line)
+            if m and m.group(2) in self.ignored_content_stems:
+                continue
             rewritten = pattern.sub(r"\1dp-\2\3", line)
             lines_out.append(rewritten)
         return "\n".join(lines_out) + ("\n" if text.endswith("\n") else "")
 
+    # Exact average RGB tuples of vanilla Mindustry v160.7 land `Floor`s whose
+    # `blendGroup == this`, `drawEdgeOut == true`, `autotile == false`, and
+    # `96x96` `<name>-edge` already resides on base `PageType.environment`.
+    _VANILLA_FLOOR_RGB: Dict[str, Tuple[float, float, float]] = {
+        "arkyic-stone": (73.4, 96.1, 66.0),
+        "basalt": (64.3, 61.2, 61.2),
+        "beryllic-stone": (54.3, 62.3, 57.1),
+        "carbon-stone": (45.1, 49.4, 57.1),
+        "crystal-floor": (76.5, 61.4, 87.4),
+        "crystalline-stone": (58.8, 51.4, 61.4),
+        "dacite": (156.2, 157.7, 174.7),
+        "darksand": (63.4, 60.0, 60.0),
+        "dense-red-stone": (190.8, 93.4, 88.6),
+        "dirt": (103.8, 64.1, 54.8),
+        "ferric-stone": (73.2, 65.6, 63.8),
+        "mud": (53.3, 31.5, 27.3),
+        "red-ice": (250.8, 226.3, 218.4),
+        "red-stone": (181.5, 80.2, 85.3),
+        "regolith": (148.9, 97.7, 70.5),
+        "rhyolite": (118.4, 74.5, 60.2),
+        "salt": (245.2, 246.4, 249.3),
+        "sand-floor": (216.9, 178.8, 144.8),
+        "shale": (96.3, 91.9, 131.8),
+        "snow": (232.9, 238.8, 244.0),
+        "spore-moss": (113.0, 73.3, 135.6),
+        "stone": (86.5, 86.5, 92.5),
+        "yellow-stone": (150.9, 100.3, 70.9),
+        "yellow-stone-plates": (167.8, 121.8, 73.8),
+    }
+
     _VANILLA_HELPER_PNGS_B64: Dict[str, str] = {
+        "edge-stencil": "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",
         "block-1": "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAq0lEQVR42t3XUQqAIAwGYE8cHaFjRM8doOeeuplRYJQwdbLtHz0MfAj9yE1nmJc1bvsBizCMU0QibgAS8QBQiA8gR1xjiWABEkI64AAKEawWpxBdAOp3mgBqWa0KaC0tFQC3vkUBtUU4CDagdfLe77oAnG0SB3Cz/H8A+BaYJyG8DF0cRC6OYheXkYvrWL0hgbdk1o0pCZBElN4dRYBG5AhzQI6AAN4IGCAhTrs4Z350exVBAAAAAElFTkSuQmCC",
         "block-2": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABaUlEQVR42u2bMQ7CMAxFe2LEETgGYuYAzEzcrAgkUKmqJiH+jpP/hwxdUvfVseMfZzpfrvPt/qAd0+F4mpkhvAEwQ/gCYIXwA2ALwuu551EMYAmh94/PgbAJ4ANhpFHsASOO7BiQmgD1N6zmLXl3NgArY1NByWpeUwBWxuamJqRHFQOwMrY0P6M8qhmAVnk+1BLwhhAyCHpBMM8ClmkQDQGSBlFr1DvGuAKwqti6BGBdtnYFAFW7dwEALWCEBuCl4oQE4C1lhQJQ+xGeEMwBWBnvBSEEAI+5YFthdJlr4UlQRajGYIRXldYD1eVwa5WnJJZAFKF/DEWm1lp74QBaKz5NAXgUVgKgJRAcQPdBkD4NaiOkrbCKIZXDEkQkiUkUlSyugxEdjelwVMfj1A0S1C0y1E1S9G1y9I2S9K2yapZma5envzChKzMDQti7ErgLYAQIqXuRSQCjjTUEOgBrCJQAlhBoAXwgPAERy1arBo/qKgAAAABJRU5ErkJggg==",
         "block-3": "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAACM0lEQVR42u3dMVIEIRBG4Tmx5RH2GJaxBzDeyJutZWBiMotA/w/mBVQZWQNfLfQMTXO8vX88Pu9ftlA7Xl5vDxHCACIAAEQAAIgAABABACACAEAEAMBfhJ+/bedtKMAvgm0OggBhhMPBzyJ0AZz986rOpQcxAvDsHFc1KOm5vBSgZZWvHJR0RFMCQB18KkIMgDgfJ6aiCEBqUSSElXGAVHhHCSujAKkYmxTbxwBmhnK00LJlHEoARkUQlHm8p2/lACM7S4lkevpY+iI2o7OzEGY+T+mLWEVnRyMkn2dpAFpbAmD3LcRtANJwVaEyDoDw6xn5qWErgAqE6o99KADCGlLRh8sAzNqjECC8iF4aoGceHjV/X3oR7t10SeEv9SY8e9OFMvgxAMLmPeUZo5lxZISqZ4unJhIRKp8JkRu66o4YPjdUAAEEEGAjgJXSUlDnA2ak9BHTDGckJww7H0A+yFGxeYQ4H1DxcSuZZvif/iOSc6mDP2NABdgdwCkoPAW5CAMWYcNQQBjqi5ifIvwUIYAAAgjglqRbkm7Km5ZiWoqJWaYmmppocq7p6aane0DDI0oCeEgPfk6Yekz1MgAe1LZUwb6lCizWYbma/cvVWLApWLDJkmXhkmUW7YMV7bNspYVbLdxq6WKLd1u82/L1MAAvcPAKkz2vMPESH8AlPl5jBbjGylb0MU6E8FWGIkAARHi+tdzH3ARga29nCAKEEQQIIwgQRhAgjCBAGEGAMIIAYYRvf97v+gIEuBUAAAAASUVORK5CYII=",
@@ -1921,6 +2561,8 @@ class ModToDataPatchConverter:
                 return s[len(self.mod_name) + 1:]
             return s
 
+        outlined_in_place: Set[str] = set()
+
         def emit_outline_if_missing(stem: str, color_hex: str, radius: int) -> None:
             out_stem = f"{stem}-outline"
             if stem in self.sprites_by_stem and out_stem not in self.sprites_by_stem:
@@ -1931,6 +2573,28 @@ class ModToDataPatchConverter:
                         self._outline_rgba(src_im, color_hex, radius),
                         stat_kind="outline",
                     )
+
+        def outline_sprite_in_place(stem: str, color_hex: str, radius: int) -> None:
+            """
+            Exact port of `UnlockableContent.makeOutline(..., makeNew=false, padding=0)`
+            and `Block.createIcons` in-place `Pixmaps.outline` replacement (`packer.registerOutlined`):
+            overwrites the sprite's RGBA pixels in-place without changing canvas dimensions.
+            """
+            if stem in outlined_in_place or stem not in self.sprites_by_stem:
+                return
+            sp = self.sprites_by_stem[stem]
+            if "blocks/environment/" in sp.dest_rel_path:
+                return
+            src_im = open_sp(sp)
+            if not self._is_nonempty_rgba(src_im):
+                return
+            out_im = self._outline_rgba(src_im, color_hex, radius)
+            buf = io.BytesIO()
+            out_im.save(buf, format="PNG", optimize=True)
+            sp.png_bytes = buf.getvalue()
+            sp.rgba_md5 = hashlib.md5(out_im.tobytes()).hexdigest()
+            outlined_in_place.add(stem)
+            self.stats.outlined_in_place_sprites += 1
 
         def process_region_parts(parts_node: Any, owner_stem: str, turret_shading: bool, color_hex: str, radius: int) -> bool:
             """Returns True if at least one DrawPart entry was present."""
@@ -1963,7 +2627,8 @@ class ModToDataPatchConverter:
             return had_any
 
         # --------------------------------------------------------------
-        # Pass 1: RegionPart / Turret / Unit Outlines & Tank Treads
+        # Pass 1a: Emit all separate `-outline` sprites FIRST (from clean
+        # un-outlined sources before any in-place outlining runs!)
         # --------------------------------------------------------------
         for rec in self.content_records:
             if rec.ctype == "block":
@@ -2004,7 +2669,8 @@ class ModToDataPatchConverter:
                         wstem = normalize_sprite_stem(raw_wname) if isinstance(raw_wname, str) and raw_wname else rec.stem
                         process_region_parts(w.get("parts"), wstem, False, color_hex, radius)
                         if outlines_enabled and isinstance(raw_wname, str) and raw_wname:
-                            wparts = w.get("parts") if isinstance(w.get("parts"), list) else []
+                            raw_wp = w.get("parts")
+                            wparts = raw_wp if isinstance(raw_wp, list) else ([raw_wp] if isinstance(raw_wp, dict) else [])
                             has_under = any(isinstance(wp, dict) and wp.get("under") for wp in wparts)
                             if (not bool(w.get("top", True))) or has_under:
                                 emit_outline_if_missing(wstem, color_hex, radius)
@@ -2025,51 +2691,94 @@ class ModToDataPatchConverter:
                                     stat_kind="outline",
                                 )
 
-                # Tank animated 1px tread slices (`UnitType.createIcons` lines 1267..1294)
-                tread_sp = self.sprites_by_stem.get(f"{rec.stem}-treads")
-                tread_rects = rec.data.get("treadRects")
-                if tread_sp is not None and isinstance(tread_rects, list) and tread_rects:
-                    pix = open_sp(tread_sp)
-                    tread_frames = int(rec.data.get("treadFrames", 18))
-                    pull_offset = int(rec.data.get("treadPullOffset", 0))
-                    for r_idx, trect in enumerate(tread_rects):
-                        if not isinstance(trect, dict):
+        # --------------------------------------------------------------
+        # Pass 1b: In-Place Unit Body / Limb / Tread / Top-Weapon Outlines
+        # & Tank Tread Frame Slicing (`UnitType.createIcons` lines 1236..1294)
+        # --------------------------------------------------------------
+        for rec in self.content_records:
+            if rec.ctype != "unit":
+                continue
+            color_hex = str(rec.data.get("outlineColor", "565666"))
+            radius = int(rec.data.get("outlineRadius", 3))
+            outlines_enabled = bool(rec.data.get("outlines", True))
+
+            if outlines_enabled:
+                # Top-mounted weapons without under-parts overwrite `<weapon>.png` in-place
+                weapons = rec.data.get("weapons")
+                if isinstance(weapons, list):
+                    for w in weapons:
+                        if not isinstance(w, dict):
                             continue
-                        sx = int(float(trect.get("x", 0)) + pix.width / 2.0)
-                        sy = int(float(trect.get("y", 0)) + pix.height / 2.0)
-                        sh = int(float(trect.get("height", 0)))
-                        if sh <= 0 or sx < 0 or sx >= pix.width:
+                        raw_wname = w.get("name")
+                        if not (isinstance(raw_wname, str) and raw_wname):
                             continue
-                        slice_px = [
-                            pix.getpixel((sx, min(max(sy + y, 0), pix.height - 1)))
-                            for y in range(sh)
-                        ]
-                        for f_idx in range(tread_frames):
-                            tread_stem = f"{rec.stem}-treads{r_idx}-{f_idx}"
-                            if tread_stem in self.sprites_by_stem:
-                                continue
-                            frame_im = Image.new("RGBA", (1, sh), (0, 0, 0, 0))
-                            for y in range(sh):
-                                idx = y + f_idx
-                                if idx >= sh:
-                                    idx = ((idx - sh + pull_offset) % sh + sh) % sh
-                                frame_im.putpixel((0, y), slice_px[idx])
-                            self._emit_generated_sprite(tread_stem, frame_im, stat_kind="tread")
+                        wstem = normalize_sprite_stem(raw_wname)
+                        raw_wp = w.get("parts")
+                        wparts = raw_wp if isinstance(raw_wp, list) else ([raw_wp] if isinstance(raw_wp, dict) else [])
+                        has_under = any(isinstance(wp, dict) and wp.get("under") for wp in wparts)
+                        if bool(w.get("top", True)) and not has_under:
+                            outline_sprite_in_place(wstem, color_hex, radius)
+
+                # Main unit body (`drawBody != false` and `!alwaysCreateOutline`)
+                if not bool(rec.data.get("alwaysCreateOutline", False)) and bool(rec.data.get("drawBody", True)):
+                    outline_sprite_in_place(rec.stem, color_hex, radius)
+
+                # Mech / Legs / Tank limb & tread base regions (`padding = 0`)
+                for limb_suffix in ("-joint", "-foot", "-joint-base", "-leg", "-treads", "-leg-base"):
+                    outline_sprite_in_place(f"{rec.stem}{limb_suffix}", color_hex, radius)
+
+            # Tank animated 1px tread slices (`UnitType.createIcons` lines 1267..1294),
+            # sliced AFTER `-treads` has been outlined in-place!
+            tread_sp = self.sprites_by_stem.get(f"{rec.stem}-treads")
+            tread_rects = rec.data.get("treadRects")
+            if tread_sp is not None and isinstance(tread_rects, list) and tread_rects:
+                pix = open_sp(tread_sp)
+                tread_frames = int(rec.data.get("treadFrames", 18))
+                pull_offset = int(rec.data.get("treadPullOffset", 0))
+                for r_idx, trect in enumerate(tread_rects):
+                    if not isinstance(trect, dict):
+                        continue
+                    sx = int(float(trect.get("x", 0)) + pix.width / 2.0)
+                    sy = int(float(trect.get("y", 0)) + pix.height / 2.0)
+                    sh = int(float(trect.get("height", 0)))
+                    if sh <= 0 or sx < 0 or sx >= pix.width:
+                        continue
+                    slice_px = [
+                        pix.getpixel((sx, min(max(sy + y, 0), pix.height - 1)))
+                        for y in range(sh)
+                    ]
+                    for f_idx in range(tread_frames):
+                        tread_stem = f"{rec.stem}-treads{r_idx}-{f_idx}"
+                        if tread_stem in self.sprites_by_stem:
+                            continue
+                        frame_im = Image.new("RGBA", (1, sh), (0, 0, 0, 0))
+                        for y in range(sh):
+                            idx = y + f_idx
+                            if idx >= sh:
+                                idx = ((idx - sh + pull_offset) % sh + sh) % sh
+                            frame_im.putpixel((0, y), slice_px[idx])
+                        self._emit_generated_sprite(tread_stem, frame_im, stat_kind="tread")
 
         # --------------------------------------------------------------
         # Pass 2: Multi-Layer Block `-full.png` (and missing base `.png`)
+        # & In-Place Turret / MassDriver Live Barrel Outlines
         # --------------------------------------------------------------
         env_skip_types = {
             "Floor", "OverlayFloor", "OreBlock", "SteamVent", "TallBlock",
             "TreeBlock", "StaticTree", "Prop", "SeaBush", "Seaweed",
-            "WobbleProp", "StaticWall", " ShallowLiquid",
+            "WobbleProp", "StaticWall", "ShallowLiquid",
         }
         top_composite_types = {
-            "WallCrafter", "BurstDrill", "DirectionalUnloader",
-            "UnitCargoUnloadPoint", "UnitAssembler", "UnitAssemblerModule",
-            "PayloadDeconstructor", "Constructor", "PayloadConveyor",
-            "PayloadRouter", "PayloadMassDriver", "ShieldWall",
+            "WallCrafter", "BurstDrill", "UnitCargoUnloadPoint", "ShieldWall",
         }
+
+        def resolve_payload_region(stem_prefix: str, suffix: str) -> Optional[Image.Image]:
+            sp = (
+                self.sprites_by_stem.get(f"{stem_prefix}{suffix}")
+                or self.sprites_by_stem.get(f"factory{suffix}-{size_for_payload}")
+                or self.sprites_by_stem.get(f"factory{suffix}-{size_for_payload}-dark")
+            )
+            return open_sp(sp) if sp is not None else None
 
         for rec in self.content_records:
             if rec.ctype != "block" or rec.converted_to_building:
@@ -2078,15 +2787,31 @@ class ModToDataPatchConverter:
             btype = rec.orig_type
             if btype in env_skip_types:
                 continue
-            if f"{bname}-full" in self.sprites_by_stem or f"block-{bname}-full" in self.sprites_by_stem:
-                continue
 
+            size_for_payload = int(rec.data.get("size", 1))
             dr = rec.data.get("drawer")
             has_draw_turret = (
                 (isinstance(dr, dict) and dr.get("type") == "DrawTurret")
                 or (isinstance(dr, dict) and dr.get("type") == "DrawMulti" and any(isinstance(x, dict) and x.get("type") == "DrawTurret" for x in dr.get("drawers", [])))
                 or (isinstance(dr, list) and any(isinstance(x, dict) and x.get("type") == "DrawTurret" for x in dr))
             )
+
+            # Even if `<bname>-full` already exists, `Block.createIcons` outlines
+            # live turret / mass-driver rotating barrel sprites in-place on `PageType.main`!
+            if btype.endswith("Turret") or has_draw_turret:
+                if bool(rec.data.get("outlineIcon", True)):
+                    ocol = str(rec.data.get("outlineColor", "404049"))
+                    orad = int(rec.data.get("outlineRadius", 4))
+                    target_stem = f"{bname}-preview" if f"{bname}-preview" in self.sprites_by_stem else bname
+                    outline_sprite_in_place(target_stem, ocol, orad)
+            elif btype in ("PayloadMassDriver", "MassDriver"):
+                if bool(rec.data.get("outlineIcon", True)):
+                    ocol = str(rec.data.get("outlineColor", "404049"))
+                    orad = int(rec.data.get("outlineRadius", 4))
+                    outline_sprite_in_place(bname, ocol, orad)
+
+            if f"{bname}-full" in self.sprites_by_stem or f"block-{bname}-full" in self.sprites_by_stem:
+                continue
 
             layers: List[Image.Image] = []
             also_emit_base = False
@@ -2171,12 +2896,8 @@ class ModToDataPatchConverter:
                         body_sp = self.sprites_by_stem[bname]
 
                 if body_sp is not None:
-                    body_im = open_sp(body_sp)
-                    if bool(rec.data.get("outlineIcon", True)):
-                        ocol = str(rec.data.get("outlineColor", "404049"))
-                        orad = int(rec.data.get("outlineRadius", 4))
-                        body_im = self._outline_rgba(body_im, ocol, orad)
-                    layers.append(body_im)
+                    # Already outlined in-place above when `outlineIcon` is True!
+                    layers.append(open_sp(body_sp))
 
                 if f"{bname}-top" in self.sprites_by_stem:
                     layers.append(open_sp(self.sprites_by_stem[f"{bname}-top"]))
@@ -2192,7 +2913,83 @@ class ModToDataPatchConverter:
                         layers.append(bot_im)
                     layers.append(open_sp(self.sprites_by_stem[bname]))
 
-            # 6. Multi-drawer Crafters / Generators / Drills / Payload / Unloaders
+            # 6. PayloadConveyor / PayloadRouter (`Freight Conveyor`, `Freight Router`):
+            #    `PayloadConveyor.icons()` & `PayloadRouter.icons()` return `{Core.atlas.find(name + "-icon")}`!
+            elif btype in ("PayloadConveyor", "PayloadRouter"):
+                icon_sp = self.sprites_by_stem.get(f"{bname}-icon") or self.sprites_by_stem.get(bname)
+                if icon_sp is not None:
+                    layers.append(open_sp(icon_sp))
+
+            # 7. PayloadMassDriver (`Freight Launcher`): `{baseRegion, outRegion, region}`
+            elif btype == "PayloadMassDriver":
+                if f"{bname}-base" in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[f"{bname}-base"]))
+                out_im = resolve_payload_region(bname, "-out")
+                if out_im is not None:
+                    layers.append(out_im)
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+
+            # 8. MassDriver (`Kinetic Propulsor`): `{baseRegion, region}`
+            elif btype == "MassDriver":
+                if f"{bname}-base" in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[f"{bname}-base"]))
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+
+            # 9. BlockProducer / Constructor / UnitFactory: `{region, outRegion, topRegion}`
+            elif btype in ("Constructor", "BlockProducer", "UnitFactory"):
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+                out_im = resolve_payload_region(bname, "-out")
+                if out_im is not None:
+                    layers.append(out_im)
+                top_im = resolve_payload_region(bname, "-top")
+                if top_im is not None:
+                    layers.append(top_im)
+
+            # 10. Reconstructor: `{region, inRegion, outRegion, topRegion}`
+            elif btype == "Reconstructor":
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+                in_im = resolve_payload_region(bname, "-in")
+                if in_im is not None:
+                    layers.append(in_im)
+                out_im = resolve_payload_region(bname, "-out")
+                if out_im is not None:
+                    layers.append(out_im)
+                top_im = resolve_payload_region(bname, "-top")
+                if top_im is not None:
+                    layers.append(top_im)
+
+            # 11. UnitAssembler: `{region, sideRegion1, topRegion}`
+            elif btype == "UnitAssembler":
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+                if f"{bname}-side1" in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[f"{bname}-side1"]))
+                top_im = resolve_payload_region(bname, "-top")
+                if top_im is not None:
+                    layers.append(top_im)
+
+            # 12. UnitAssemblerModule / PayloadDeconstructor / PayloadLoader / PayloadUnloader: `{region, topRegion}`
+            elif btype in ("UnitAssemblerModule", "PayloadDeconstructor", "PayloadLoader", "PayloadUnloader"):
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+                top_im = resolve_payload_region(bname, "-top")
+                if top_im is not None:
+                    layers.append(top_im)
+
+            # 13. DirectionalUnloader: `{region, topRegion, arrowRegion}`
+            elif btype == "DirectionalUnloader":
+                if bname in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[bname]))
+                if f"{bname}-top" in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[f"{bname}-top"]))
+                if f"{bname}-arrow" in self.sprites_by_stem:
+                    layers.append(open_sp(self.sprites_by_stem[f"{bname}-arrow"]))
+
+            # 14. Multi-drawer Crafters / Generators / Drills
             else:
                 drawer_seq: List[Any] = []
                 if isinstance(dr, dict) and dr.get("type") == "DrawMulti" and isinstance(dr.get("drawers"), list):
@@ -2221,8 +3018,6 @@ class ModToDataPatchConverter:
                         if has_bot:
                             layers.append(open_sp(self.sprites_by_stem[f"{bname}-bottom"]))
                         layers.append(open_sp(self.sprites_by_stem[bname]))
-                        if btype in ("UnitAssembler", "UnitAssemblerModule") and f"{bname}-side1" in self.sprites_by_stem:
-                            layers.append(open_sp(self.sprites_by_stem[f"{bname}-side1"]))
                         if f"{bname}-top" in self.sprites_by_stem and (has_top or has_bot):
                             layers.append(open_sp(self.sprites_by_stem[f"{bname}-top"]))
 
@@ -2242,6 +3037,7 @@ class ModToDataPatchConverter:
                 self._emit_generated_sprite(bname, comp_im, stat_kind="icon")
 
     def convert(self) -> ConversionStats:
+        self._discover_ignored_content_and_maps()
         self._collect_audio_and_sprites()
         self._collect_and_parse_content()
         self._synthesize_icons_outlines_and_treads()
@@ -2338,11 +3134,13 @@ def format_report(stats: ConversionStats, out_zip: Path) -> str:
         f" Mindustry Mod -> DataPatch Asset Zip Report ({stats.mod_name})",
         f"======================================================================",
         f" Output Zip                 : {out_zip} ({size_mb:.2f} MB)",
-        f" Content Files Converted    : {stats.total_content_out} (from {stats.total_content_in} loadable files; {stats.skipped_planet_sector_files} planet/sector files skipped)",
+        f" Content Files Converted    : {stats.total_content_out} (from {stats.total_content_in} loadable files; {stats.skipped_planet_sector_files} planet/sector + {stats.ignored_content_files} ignored-planet files skipped)",
+        f" Ignored Planet Sprites     : {stats.ignored_sprites} sprites excluded",
         f" Vanilla Overrides -> Patch : {stats.vanilla_overrides_patched}",
         f" Synthesized Block Icons    : {stats.synthesized_icons}",
-        f" Synthesized Part Outlines  : {stats.synthesized_outlines}",
+        f" Synthesized Part Outlines  : {stats.synthesized_outlines} (+ {stats.outlined_in_place_sprites} unit/limb/turret sprites outlined in-place)",
         f" Synthesized Tank Treads    : {stats.synthesized_treads}",
+        f" Liquid & Floor Edges       : {len(stats.synthesized_floor_edges)} custom 96x96 `-edge`s + {len(stats.vanilla_blendgroup_floors)} 1:1 vanilla `blendGroup`s",
         f" Duplicate Assets Merged    : {len(stats.deduplicated_assets)}",
         f"----------------------------------------------------------------------",
         f" Environment Atlas (`data-patch-reserved-env`, limit {stats.env_limit}x{stats.env_limit}, pad=2):",
@@ -2419,6 +3217,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Optional output PNG path visualizing the packed `data-patch-reserved-env` page.",
     )
+    ap.add_argument(
+        "--ignore-planets",
+        type=str,
+        default="trecara",
+        help="Comma-separated planet names to ignore during conversion (default: 'trecara'; pass '' to disable).",
+    )
     args = ap.parse_args(argv)
 
     in_path = Path(args.input_mod)
@@ -2438,6 +3242,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Error: input mod path not found: {in_path}", file=sys.stderr)
             return 1
 
+        ignore_planets = {p.strip().lower() for p in args.ignore_planets.split(",") if p.strip()}
         out_zip = Path(args.output_zip)
         converter = ModToDataPatchConverter(
             mod_dir=mod_root,
@@ -2447,6 +3252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             convert_buildings=not args.no_building_conversion,
             building_privilege=args.building_privilege,
             atlas_preview_path=args.atlas_preview,
+            ignore_planets=ignore_planets,
         )
         stats = converter.convert()
         print(format_report(stats, out_zip))
