@@ -2769,8 +2769,43 @@ class ModToDataPatchConverter:
             "WobbleProp", "StaticWall", "ShallowLiquid",
         }
         top_composite_types = {
-            "WallCrafter", "BurstDrill", "UnitCargoUnloadPoint", "ShieldWall",
+            "WallCrafter", "BurstDrill", "UnitCargoUnloadPoint",
         }
+
+        # Populate `mapColor` for non-synthetic environment/floor/wall blocks
+        # (`Block.createIcons` line 1563: `mapColor.set(image.get(image.width/2, image.height/2))`),
+        # which `DataManager.load` otherwise leaves at `Color(0, 0, 0, 1)` (pure black),
+        # causing `Tile.getFloorColor()` (leg/mech step particles, liquid walk ripples,
+        # and minimap floor colors) to render completely black!
+        for rec in self.content_records:
+            if rec.ctype != "block" or rec.orig_type not in env_skip_types or rec.orig_type == "OreBlock":
+                continue
+            if "mapColor" in rec.data:
+                continue
+            sp = (
+                self.sprites_by_stem.get(f"{rec.stem}-full")
+                or self.sprites_by_stem.get(rec.stem)
+                or self.sprites_by_stem.get(f"{rec.stem}1")
+            )
+            if sp is None:
+                continue
+            im = open_sp(sp)
+            if im.width <= 0 or im.height <= 0:
+                continue
+            r, g, b, a = im.getpixel((im.width // 2, im.height // 2))
+            if a == 0:
+                raw = im.tobytes()
+                rs = gs = bs = cnt = 0
+                for idx in range(0, len(raw), 4):
+                    if raw[idx + 3] > 0:
+                        rs += raw[idx]
+                        gs += raw[idx + 1]
+                        bs += raw[idx + 2]
+                        cnt += 1
+                if cnt == 0:
+                    continue
+                r, g, b = rs // cnt, gs // cnt, bs // cnt
+            rec.data["mapColor"] = f"{r:02x}{g:02x}{b:02x}"
 
         def resolve_payload_region(stem_prefix: str, suffix: str) -> Optional[Image.Image]:
             sp = (
@@ -3028,6 +3063,7 @@ class ModToDataPatchConverter:
                             layers = [open_sp(cand)]
                             break
 
+            layers = [im for im in layers if self._is_nonempty_rgba(im)]
             if not layers:
                 continue
 
