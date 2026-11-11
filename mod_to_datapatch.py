@@ -2563,7 +2563,12 @@ class ModToDataPatchConverter:
 
         outlined_in_place: Set[str] = set()
 
-        def emit_outline_if_missing(stem: str, color_hex: str, radius: int) -> None:
+        def emit_outline_if_missing(
+            stem: str,
+            color_hex: str,
+            radius: int,
+            emit_if_empty: bool = False,
+        ) -> None:
             out_stem = f"{stem}-outline"
             if stem in self.sprites_by_stem and out_stem not in self.sprites_by_stem:
                 src_im = open_sp(self.sprites_by_stem[stem])
@@ -2571,6 +2576,16 @@ class ModToDataPatchConverter:
                     self._emit_generated_sprite(
                         out_stem,
                         self._outline_rgba(src_im, color_hex, radius),
+                        stat_kind="outline",
+                    )
+                elif emit_if_empty:
+                    # `RegionPart.draw()` (`turretShading == true`) draws `outlines[i]`
+                    # unconditionally without checking `.found()`, so a 100% transparent
+                    # part sprite (e.g. heat-only `*-top.png`) still needs a transparent
+                    # `*-outline.png` region to avoid drawing `Core.atlas.error` (`ohno`).
+                    self._emit_generated_sprite(
+                        out_stem,
+                        Image.new("RGBA", src_im.size, (0, 0, 0, 0)),
                         stat_kind="outline",
                     )
 
@@ -2612,16 +2627,22 @@ class ModToDataPatchConverter:
                 ptype = p.get("type", "RegionPart")
                 if ptype == "RegionPart" or ("type" not in p and ("suffix" in p or "name" in p)):
                     draw_reg = bool(p.get("drawRegion", True))
-                    default_outline = not ("blending" in p and "color" in p and "outline" not in p)
-                    outline = bool(p.get("outline", default_outline))
+                    p_ts = bool(p.get("turretShading", turret_shading))
+                    outline = bool(p.get("outline", True))
                     mirror = bool(p.get("mirror", False))
                     raw_name = p.get("name")
                     suffix = str(p.get("suffix", ""))
                     real = normalize_sprite_stem(raw_name) if isinstance(raw_name, str) and raw_name else f"{owner_stem}{suffix}"
-                    if draw_reg and outline:
-                        targets = [f"{real}-r", f"{real}-l"] if (mirror and turret_shading) else [real]
-                        for t in targets:
-                            emit_outline_if_missing(t, color_hex, radius)
+                    if outline:
+                        targets = [f"{real}-r", f"{real}-l"] if (mirror and p_ts) else [real]
+                        if p_ts:
+                            for t in targets:
+                                emit_outline_if_missing(t, color_hex, radius, emit_if_empty=True)
+                            if any(f"{t}-outline" not in self.sprites_by_stem for t in targets):
+                                p["outline"] = False
+                        elif draw_reg:
+                            for t in targets:
+                                emit_outline_if_missing(t, color_hex, radius)
                 if "children" in p:
                     process_region_parts(p["children"], owner_stem, turret_shading, color_hex, radius)
             return had_any
@@ -2651,8 +2672,19 @@ class ModToDataPatchConverter:
                             for v in ap.values():
                                 if process_region_parts(v, rec.stem, True, color_hex, radius):
                                     has_parts = True
+                        if rec.stem not in self.sprites_by_stem:
+                            # Part-only turrets (e.g. `03c-13-instauro`) may omit `<stem>.png`,
+                            # leaving `block.region == Core.atlas.error` (`ohno`). Emit a
+                            # transparent `<size*32>x<size*32>` `<stem>.png` matching part-only
+                            # turrets like `03c-08-shaft` and `03c-09-cavalier`.
+                            px = max(1, int(rec.data.get("size", 1))) * 32
+                            self._emit_generated_sprite(
+                                rec.stem,
+                                Image.new("RGBA", (px, px), (0, 0, 0, 0)),
+                                stat_kind="icon",
+                            )
                         if has_parts:
-                            emit_outline_if_missing(rec.stem, color_hex, radius)
+                            emit_outline_if_missing(rec.stem, color_hex, radius, emit_if_empty=True)
 
             elif rec.ctype == "unit":
                 color_hex = str(rec.data.get("outlineColor", "565666"))
