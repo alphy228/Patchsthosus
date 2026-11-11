@@ -1,0 +1,10 @@
+{
+  "name": "patchsthosus",
+  "displayName": "Patchsthosus Map Converter",
+  "author": "Patchsthosus",
+  "description": "Server plugin that automatically converts raw Asthosus mod .msav maps in config/maps/ into vanilla-compatible Patchsthosus (DataPatch) maps on the fly.",
+  "version": "1.0.0",
+  "main": "patchsthosus.PatchsthosusPlugin",
+  "minGameVersion": "156",
+  "hidden": true
+}

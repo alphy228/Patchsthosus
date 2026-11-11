@@ -1,0 +1,44 @@
+plugins {
+    id 'java'
+}
+
+group = 'patchsthosus'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://raw.githubusercontent.com/Zelaux/MindustryRepo/master/repository' }
+    maven { url = 'https://www.jitpack.io' }
+}
+
+ext {
+    mindustryVersion = project.findProperty('mindustryVersion') ?: 'v160.7'
+}
+
+dependencies {
+    def localServerJar = project.findProperty('serverJar')
+    if (localServerJar != null && file(localServerJar).exists()) {
+        compileOnly files(localServerJar)
+    } else {
+        compileOnly "com.github.Anuken.Arc:arc-core:${mindustryVersion}"
+        compileOnly "com.github.Anuken.Mindustry:core:${mindustryVersion}"
+        compileOnly "com.github.Anuken.Mindustry:server:${mindustryVersion}"
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+jar {
+    archiveBaseName.set('patchsthosus-plugin')
+    archiveVersion.set('')
+    from('plugin.json')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

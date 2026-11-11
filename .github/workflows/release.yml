@@ -1,0 +1,183 @@
+name: Build & Publish Patchsthosus Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      asthosus_tag:
+        description: "Asthosus release tag to package (leave empty for latest Catana791/Asthosus release)"
+        required: false
+        default: ""
+      mindustry_version:
+        description: "Mindustry server release tag to compile & verify against"
+        required: false
+        default: "v160.7"
+      force_release:
+        description: "Publish/update GitHub Release even if tag already exists"
+        type: boolean
+        required: false
+        default: true
+  schedule:
+    # Automatically check daily at 04:00 UTC for new Catana791/Asthosus releases
+    - cron: "0 4 * * *"
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip Pillow
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+          cache: "gradle"
+
+      - name: Resolve latest Catana791/Asthosus release
+        id: asthosus
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.asthosus_tag }}
+          FORCE_RELEASE: ${{ github.event.inputs.force_release }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/asthosus-src dist
+
+          if [ -n "${INPUT_TAG}" ]; then
+            REL_JSON=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/Catana791/Asthosus/releases/tags/${INPUT_TAG}" || true)
+            ASTHOSUS_TAG="${INPUT_TAG}"
+          else
+            REL_JSON=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/Catana791/Asthosus/releases/latest" || true)
+            ASTHOSUS_TAG=$(printf '%s' "${REL_JSON}" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(d.get("tag_name",""))')
+          fi
+
+          if [ -z "${ASTHOSUS_TAG}" ]; then
+            TAGS_JSON=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/Catana791/Asthosus/tags?per_page=1")
+            ASTHOSUS_TAG=$(printf '%s' "${TAGS_JSON}" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "[]"); print(d[0]["name"] if d else "main")')
+          fi
+
+          echo "Resolved Catana791/Asthosus version: ${ASTHOSUS_TAG}"
+          git clone --depth 1 --branch "${ASTHOSUS_TAG}" https://github.com/Catana791/Asthosus.git /tmp/asthosus-src \
+            || git clone --depth 1 https://github.com/Catana791/Asthosus.git /tmp/asthosus-src
+
+          if [[ "${REF_NAME}" == v* ]]; then
+            RELEASE_TAG="${REF_NAME}"
+          else
+            CLEAN_TAG="${ASTHOSUS_TAG#v}"
+            RELEASE_TAG="asthosus-v${CLEAN_TAG}"
+          fi
+
+          SHOULD_PUBLISH="false"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] || [[ "${REF_NAME}" == v* ]]; then
+            SHOULD_PUBLISH="true"
+          elif [ "${EVENT_NAME}" = "schedule" ]; then
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")
+            if [ "${HTTP_CODE}" = "404" ]; then
+              SHOULD_PUBLISH="true"
+            else
+              echo "Release ${RELEASE_TAG} already exists; skipping duplicate scheduled publish."
+            fi
+          fi
+
+          echo "asthosus_tag=${ASTHOSUS_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate DataPatch asset zip (fitting 500x500 env atlas)
+        run: |
+          set -euo pipefail
+          python3 mod_to_datapatch.py \
+            /tmp/asthosus-src \
+            dist/asthosus-datapatch.zip \
+            --env-limit 500 \
+            --mode auto \
+            --atlas-preview dist/asthosus-env-atlas-500x500.png \
+            | tee dist/conversion-report.txt
+
+          grep -q "FITS 1 PAGE!" dist/conversion-report.txt
+
+          python3 scripts/generate_test_mlog.py \
+            dist/asthosus-datapatch.zip \
+            dist/test_all_dp_world_processor.mlog
+          cp scripts/test_all_dp_console.js dist/test_all_dp_console.js
+
+      - name: Download Mindustry server JAR & build patchsthosus-plugin.jar
+        env:
+          MINDUSTRY_VER: ${{ github.event.inputs.mindustry_version || 'v160.7' }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/Anuken/Mindustry/releases/download/${MINDUSTRY_VER}/server-release.jar" \
+            -o /tmp/server-release.jar
+
+          ./patchsthosus-plugin/gradlew -p patchsthosus-plugin clean jar \
+            -PserverJar=/tmp/server-release.jar \
+            -PmindustryVersion="${MINDUSTRY_VER}"
+
+          cp patchsthosus-plugin/build/libs/patchsthosus-plugin.jar dist/patchsthosus-plugin.jar
+          ls -lh dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: patchsthosus-${{ steps.asthosus.outputs.asthosus_tag }}
+          path: |
+            dist/asthosus-datapatch.zip
+            dist/patchsthosus-plugin.jar
+            dist/asthosus-env-atlas-500x500.png
+            dist/test_all_dp_console.js
+            dist/test_all_dp_world_processor.mlog
+            dist/conversion-report.txt
+
+      - name: Publish GitHub Release
+        if: steps.asthosus.outputs.should_publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.asthosus.outputs.release_tag }}
+          name: "Patchsthosus (${{ steps.asthosus.outputs.asthosus_tag }})"
+          body: |
+            Automated Patchsthosus build for **`Catana791/Asthosus` `${{ steps.asthosus.outputs.asthosus_tag }}`**.
+
+            ### Included Release Assets
+            - **`asthosus-datapatch.zip`** — DataPatch asset pack engineered to fit Mindustry's `500x500` `data-patch-reserved-env` atlas in **1 page** with synthesized multi-layer block icons, `RegionPart` outlines, and tank tread frames. **Extract its contents directly into your dedicated server's `config/assets/` folder.**
+            - **`patchsthosus-plugin.jar`** — Dedicated server plugin (`config/mods/patchsthosus-plugin.jar`) that automatically converts raw Asthosus `.msav` maps in `config/maps/` on the fly (including world processors, Generation tab world logic, and MapObjectives, disabling all non-Asthosus blocks with `hideBannedBlocks: true`, and never embedding server assets into maps).
+            - **`test_all_dp_console.js`** & **`test_all_dp_world_processor.mlog`** — Test scripts to place all `dp-*` blocks and spawn all `dp-*` units on an empty test map.
+
+            ### Server Installation
+            ```bash
+            mkdir -p config/assets config/mods config/maps
+            unzip -o asthosus-datapatch.zip -d config/assets/
+            cp patchsthosus-plugin.jar config/mods/
+            # Place raw Asthosus .msav maps in config/maps/ and start server-release.jar!
+            ```
+          files: |
+            dist/asthosus-datapatch.zip
+            dist/patchsthosus-plugin.jar
+            dist/asthosus-env-atlas-500x500.png
+            dist/test_all_dp_console.js
+            dist/test_all_dp_world_processor.mlog

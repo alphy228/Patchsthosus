@@ -1,0 +1,297 @@
+# ============================================================================
+# Patchsthosus — World Processor Script: Place ALL dp-* Blocks & Spawn ALL dp-* Units
+# Paste into a World Processor (or Generation -> World Logic) on a 200x200+ empty map.
+# Runs once automatically (`initialized` guard) and stops.
+# ============================================================================
+jump done equal initialized 1
+set initialized 1
+setrule unitCap 2000
+setblock floor @dp-arcana-vent 8 8
+setblock floor @dp-arcane-moss 10 8
+setblock floor @dp-barite-floor 12 8
+setblock floor @dp-barite-geyser 14 8
+setblock floor @dp-barite-vent 16 8
+setblock floor @dp-black-brick-tiles 18 8
+setblock floor @dp-blue-fungus-floor 20 8
+setblock floor @dp-brown-sand-floor 22 8
+setblock floor @dp-brown-sand-vent 24 8
+setblock floor @dp-coarse-dirt 26 8
+setblock floor @dp-cold-obsidian-floor 28 8
+setblock floor @dp-cold-obsidian-vent 30 8
+setblock floor @dp-dead-moss 32 8
+setblock floor @dp-deep-oasis-water 34 8
+setblock floor @dp-demetite-stone 36 8
+setblock floor @dp-demetite-vent 38 8
+setblock floor @dp-dry-blue-fungus-floor 40 8
+setblock floor @dp-ferrinite-stone 42 8
+setblock floor @dp-ferrinite-vent 44 8
+setblock floor @dp-glass-floor 46 8
+setblock floor @dp-hardened-sand-floor 48 8
+setblock floor @dp-hardened-sand-vent 50 8
+setblock floor @dp-hardened-sand-water 52 8
+setblock floor @dp-hive-tile 54 8
+setblock floor @dp-liquid-barite-floor 56 8
+setblock floor @dp-mudstone-rift 58 8
+setblock floor @dp-oasis-geyser 60 8
+setblock floor @dp-obsidian-floor 62 8
+setblock floor @dp-obsidian-vent 64 8
+setblock floor @dp-quicksand 66 8
+setblock floor @dp-radian-barite-floor 68 8
+setblock floor @dp-radian-vent 70 8
+setblock floor @dp-red-sand-floor 72 8
+setblock floor @dp-red-sand-vent 74 8
+setblock floor @dp-shallow-oasis-water 76 8
+setblock floor @dp-slag-geyser 78 8
+setblock floor @dp-terracotta-floor 80 8
+setblock floor @dp-terracotta-vent 82 8
+setblock ore @dp-arcane-tendrils 8 12
+setblock ore @dp-mushroom-stem 10 12
+setblock ore @dp-ore-lignite 12 12
+setblock ore @dp-ore-obsidian 14 12
+setblock block @dp-03c-01-catapult 8 16 @sharded 0
+setblock block @dp-03c-02-spray 11 16 @sharded 0
+setblock block @dp-03c-03-singe 14 16 @sharded 0
+setblock block @dp-04d-05-friction-quarry 17 16 @sharded 0
+setblock block @dp-05e-01-ferrinite-duct 20 16 @sharded 0
+setblock block @dp-05e-02-transverse-duct 23 16 @sharded 0
+setblock block @dp-05e-03-crosium-conveyor 26 16 @sharded 0
+setblock block @dp-05e-04-ferrinite-duct-router 29 16 @sharded 0
+setblock block @dp-05e-05-ferrinite-duct-junction 32 16 @sharded 0
+setblock block @dp-05e-06-ferrinite-duct-bridge 35 16 @sharded 0
+setblock block @dp-05e-07-duct-sorter 38 16 @sharded 0
+setblock block @dp-05e-08-duct-sorter-inverted 41 16 @sharded 0
+setblock block @dp-05e-09-overflow-controller 44 16 @sharded 0
+setblock block @dp-05e-09-p-underflow-controller 47 16 @sharded 0
+setblock block @dp-05e-10-heavy-unloader 50 16 @sharded 0
+setblock block @dp-05e-13-heat-distributor 53 16 @sharded 0
+setblock block @dp-06f-01-aqueduct 56 16 @sharded 0
+setblock block @dp-06f-01-b-viaduct 59 16 @sharded 0
+setblock block @dp-06f-02-aqueduct-junction 62 16 @sharded 0
+setblock block @dp-06f-03-aqueduct-router 65 16 @sharded 0
+setblock block @dp-06f-04-aqueduct-bridge 68 16 @sharded 0
+setblock block @dp-06f-05-lodestone-pump 71 16 @sharded 0
+setblock block @dp-07g-01-ferrinite-wire 74 16 @sharded 0
+setblock block @dp-07g-02-reinforced-wire 77 16 @sharded 0
+setblock block @dp-07g-03-rectifier 80 16 @sharded 0
+setblock block @dp-07g-04-network-terminal 83 16 @sharded 0
+setblock block @dp-07g-05-connector-node 86 16 @sharded 0
+setblock block @dp-07g-06-power-cell 89 16 @sharded 0
+setblock block @dp-07g-07-ignition-generator 92 16 @sharded 0
+setblock block @dp-08h-01-ferrinite-wall-small 95 16 @sharded 0
+setblock block @dp-08h-03-lodestone-wall-small 98 16 @sharded 0
+setblock block @dp-08h-05-lithium-wall-small 101 16 @sharded 0
+setblock block @dp-08h-07-obsidian-wall-small 104 16 @sharded 0
+setblock block @dp-08h-09-barite-wall-small 107 16 @sharded 0
+setblock block @dp-08h-11-crosium-wall-small 110 16 @sharded 0
+setblock block @dp-08h-13-webbing-wall-small 113 16 @sharded 0
+setblock block @dp-08h-15-draysten-wall-small 116 16 @sharded 0
+setblock block @dp-09i-20-pyre 119 16 @sharded 0
+setblock block @dp-10j-14-freight-conveyor 122 16 @sharded 0
+setblock block @dp-10j-15-freight-router 125 16 @sharded 0
+setblock block @dp-11k-08-explosive-mine 128 16 @sharded 0
+setblock block @dp-11k-10-restoration-projector 131 16 @sharded 0
+setblock block @dp-12l-01-logic-chip 134 16 @sharded 0
+setblock block @dp-12l-02-logic-control 137 16 @sharded 0
+setblock block @dp-12l-03-hardened-message 140 16 @sharded 0
+setblock block @dp-12l-05-memory-chip 143 16 @sharded 0
+setblock block @dp-23w-25-strataduct 146 16 @sharded 0
+setblock block @dp-23w-27-strataduct-junction 149 16 @sharded 0
+setblock block @dp-23w-28-strataduct-router 152 16 @sharded 0
+setblock block @dp-23w-29-strataduct-bridge 155 16 @sharded 0
+setblock block @dp-aged-demetite-wall 158 16 @sharded 0
+setblock block @dp-aged-ferrinite-wall 161 16 @sharded 0
+setblock block @dp-arcana-spikes 164 16 @sharded 0
+setblock block @dp-arcane-moss-wall 167 16 @sharded 0
+setblock block @dp-barite-boulder 170 16 @sharded 0
+setblock block @dp-blue-fungus-wall 173 16 @sharded 0
+setblock block @dp-brown-sand-wall 176 16 @sharded 0
+setblock block @dp-coarse-dirt-boulder 179 16 @sharded 0
+setblock block @dp-coarse-dirt-wall 182 16 @sharded 0
+setblock block @dp-cold-obsidian-wall 185 16 @sharded 0
+setblock block @dp-dead-bush 188 16 @sharded 0
+setblock block @dp-dead-moss-wall 8 19 @sharded 0
+setblock block @dp-dead-tree 11 19 @sharded 0
+setblock block @dp-demetic-wall 14 19 @derelict 0
+setblock block @dp-demetite-boulder 17 19 @sharded 0
+setblock block @dp-demetite-wall 20 19 @derelict 0
+setblock block @dp-dry-blue-fungus-wall 23 19 @sharded 0
+setblock block @dp-env-barite-wall 26 19 @derelict 0
+setblock block @dp-env-obsidian-wall 29 19 @derelict 0
+setblock block @dp-ferrinite-boulder 32 19 @sharded 0
+setblock block @dp-ferrinite-wall 35 19 @derelict 0
+setblock block @dp-ferritic-wall 38 19 @derelict 0
+setblock block @dp-hardened-obsidian-spikes 41 19 @sharded 0
+setblock block @dp-hardened-sand-foundling 44 19 @sharded 0
+setblock block @dp-hardened-sand-wall 47 19 @sharded 0
+setblock block @dp-hive-barricade-small 50 19 @sharded 0
+setblock block @dp-hive-boulder 53 19 @sharded 0
+setblock block @dp-hive-vein 56 19 @sharded 0
+setblock block @dp-hive-wall 59 19 @sharded 0
+setblock block @dp-imaginary-bridge 62 19 @sharded 0
+setblock block @dp-imaginary-junction 65 19 @sharded 0
+setblock block @dp-kelp 68 19 @sharded 0
+setblock block @dp-large-hardened-obsidian-spikes 71 19 @sharded 0
+setblock block @dp-large-obsidian-spikes 74 19 @sharded 0
+setblock block @dp-mushroom-cap 77 19 @sharded 0
+setblock block @dp-obsidian-spikes 80 19 @sharded 0
+setblock block @dp-radian-barite-wall 83 19 @sharded 0
+setblock block @dp-red-sand-lump 86 19 @sharded 0
+setblock block @dp-red-sand-wall 89 19 @sharded 0
+setblock block @dp-reed 92 19 @sharded 0
+setblock block @dp-terracotta-wall 95 19 @sharded 0
+setblock block @dp-03c-04-skip 98 19 @sharded 0
+setblock block @dp-03c-05-billow 102 19 @sharded 0
+setblock block @dp-03c-06-depulse 106 19 @sharded 0
+setblock block @dp-03c-07-subtile 110 19 @sharded 0
+setblock block @dp-03c-08-shaft 114 19 @sharded 0
+setblock block @dp-03c-09-cavalier 118 19 @sharded 0
+setblock block @dp-03c-10-accendret 122 19 @sharded 0
+setblock block @dp-04d-01-ferrinite-mining-unit 126 19 @sharded 0
+setblock block @dp-04d-02-demetite-mining-unit 130 19 @sharded 0
+setblock block @dp-04d-06-friction-quarry-large 134 19 @sharded 0
+setblock block @dp-04d-11-geode-cracker 138 19 @sharded 0
+setblock block @dp-05e-04-g-ferrinite-duct-distributor 142 19 @sharded 0
+setblock block @dp-05e-10-i-kinetic-propulsor 146 19 @sharded 0
+setblock block @dp-05e-11-unit-cargo-base-station 150 19 @sharded 0
+setblock block @dp-05e-12-unit-cargo-drop-point 154 19 @sharded 0
+setblock block @dp-06f-06-exothermic-pump 158 19 @sharded 0
+setblock block @dp-06f-07-oasis-water-sieve 162 19 @sharded 0
+setblock block @dp-06f-08-liquid-vat 166 19 @sharded 0
+setblock block @dp-07g-06-q-voltage-capacitator 170 19 @sharded 0
+setblock block @dp-07g-08-pressure-turbine 174 19 @sharded 0
+setblock block @dp-08h-02-ferrinite-wall-large 178 19 @sharded 0
+setblock block @dp-08h-04-lodestone-wall-large 182 19 @sharded 0
+setblock block @dp-08h-06-lithium-wall-large 186 19 @sharded 0
+setblock block @dp-08h-08-obsidian-wall-large 8 23 @sharded 0
+setblock block @dp-08h-10-barite-wall-large 12 23 @sharded 0
+setblock block @dp-08h-12-crosium-wall-large 16 23 @sharded 0
+setblock block @dp-08h-14-webbing-wall-large 20 23 @sharded 0
+setblock block @dp-08h-16-draysten-wall-large 24 23 @sharded 0
+setblock block @dp-09i-01-lodestone-mixer 28 23 @sharded 0
+setblock block @dp-09i-03-lithium-grinder 32 23 @sharded 0
+setblock block @dp-09i-06-barite-quern 36 23 @sharded 0
+setblock block @dp-09i-07-barite-cooler 40 23 @sharded 0
+setblock block @dp-09i-13-expansion-tank 44 23 @sharded 0
+setblock block @dp-09i-15-lignite-burner 48 23 @sharded 0
+setblock block @dp-10j-16-unit-resynthesizer 52 23 @sharded 0
+setblock block @dp-11k-07-storage-capsule 56 23 @sharded 0
+setblock block @dp-11k-11-restoration-dome 60 23 @sharded 0
+setblock block @dp-23w-01-fracture 64 23 @sharded 0
+setblock block @dp-23w-09-mudstone-dredge 68 23 @sharded 0
+setblock block @dp-23w-11-mycillite-harvester 72 23 @sharded 0
+setblock block @dp-autoforge 76 23 @sharded 0
+setblock block @dp-barite-hive 80 23 @sharded 0
+setblock block @dp-barite-interceptor 84 23 @sharded 0
+setblock block @dp-barite-tempest 88 23 @sharded 0
+setblock block @dp-hive-barricade-large 92 23 @sharded 0
+setblock block @dp-large-barite-hive 96 23 @sharded 0
+setblock block @dp-mechanical-joint 100 23 @sharded 0
+setblock block @dp-03c-11-fulmination 105 24 @sharded 0
+setblock block @dp-03c-12-syntaxe 110 24 @sharded 0
+setblock block @dp-03c-13-instauro 115 24 @sharded 0
+setblock block @dp-03c-14-myriad 120 24 @sharded 0
+setblock block @dp-03c-15-typhoon 125 24 @sharded 0
+setblock block @dp-03c-17-tralux 130 24 @sharded 0
+setblock block @dp-03c-18-verite 135 24 @sharded 0
+setblock block @dp-03c-19-missile-battery 140 24 @sharded 0
+setblock block @dp-04d-03-ferrinite-crusher 145 24 @sharded 0
+setblock block @dp-04d-04-demetite-crusher 150 24 @sharded 0
+setblock block @dp-04d-07-abrasion-quarry 155 24 @sharded 0
+setblock block @dp-04d-09-geothermal-accumulator 160 24 @sharded 0
+setblock block @dp-04d-10-decompression-extractor 165 24 @sharded 0
+setblock block @dp-04d-12-slag-cooling-mold 170 24 @sharded 0
+setblock block @dp-06f-07-p-oasis-water-griddle 175 24 @sharded 0
+setblock block @dp-06f-09-liquid-silo 180 24 @sharded 0
+setblock block @dp-07g-09-cretite-turbine 185 24 @sharded 0
+setblock block @dp-07g-10-discharge-generator 9 29 @sharded 0
+setblock block @dp-07g-11-radiation-power-plant 14 29 @sharded 0
+setblock block @dp-09i-02-lodestone-basin 19 29 @sharded 0
+setblock block @dp-09i-04-lithium-compactor 24 29 @sharded 0
+setblock block @dp-09i-05-cretite-mixer 29 29 @sharded 0
+setblock block @dp-09i-08-crosium-infuser 34 29 @sharded 0
+setblock block @dp-09i-09-barite-loom 39 29 @sharded 0
+setblock block @dp-09i-11-nontragen-synthesizer 44 29 @sharded 0
+setblock block @dp-09i-12-pressure-rig 49 29 @sharded 0
+setblock block @dp-09i-14-large-expansion-tank 54 29 @sharded 0
+setblock block @dp-09i-16-cretite-etna 59 29 @sharded 0
+setblock block @dp-09i-17-solar-heater-panel 64 29 @sharded 0
+setblock block @dp-09i-19-sand-compactor 69 29 @sharded 0
+setblock block @dp-10j-04-basic-assembler-constituent 74 29 @sharded 0
+setblock block @dp-10j-05-advanced-assembler-constituent 79 29 @sharded 0
+setblock block @dp-10j-08-component-disassembler 84 29 @sharded 0
+setblock block @dp-10j-09-component-assembler 89 29 @sharded 0
+setblock block @dp-10j-10-rudimentary-component-assembler 94 29 @sharded 0
+setblock block @dp-10j-17-freight-launcher 99 29 @sharded 0
+setblock block @dp-11k-01-core-essence 104 29 @sharded 0
+setblock block @dp-11k-04-core-petra 109 29 @sharded 0
+setblock block @dp-11k-09-barrier-projector 114 29 @sharded 0
+setblock block @dp-12l-04-logic-screen 119 29 @sharded 0
+setblock block @dp-23w-10-spore-siphon 124 29 @sharded 0
+setblock block @dp-23w-68-luminary-vat 129 29 @sharded 0
+setblock block @dp-23w-92-core-hyphos 134 29 @sharded 0
+setblock block @dp-barite-slinger 139 29 @sharded 0
+setblock block @dp-huge-barite-hive 144 29 @sharded 0
+setblock block @dp-large-autoforge 149 29 @sharded 0
+setblock block @dp-03c-16-concite 154 29 @sharded 0
+setblock block @dp-03c-20-draysten-mortar 160 29 @sharded 0
+setblock block @dp-04d-08-discharge-quarry 166 29 @sharded 0
+setblock block @dp-07g-11-s-diffusion-reactor 172 29 @sharded 0
+setblock block @dp-09i-10-draysten-crucible 178 29 @sharded 0
+setblock block @dp-09i-18-red-sand-filter 184 29 @sharded 0
+setblock block @dp-10j-06-progressive-assembler-constituent 9 35 @sharded 0
+setblock block @dp-10j-07-cumulative-assembler-constituent 15 35 @sharded 0
+setblock block @dp-10j-11-median-component-assembler 21 35 @sharded 0
+setblock block @dp-11k-02-core-substratum 27 35 @sharded 0
+setblock block @dp-11k-05-core-silex 33 35 @sharded 0
+setblock block @dp-11k-12-voidlock-generator 39 35 @sharded 0
+setblock block @dp-07g-12-draysten-destabilizer 46 36 @sharded 0
+setblock block @dp-10j-00-ground-mounting-bay 53 36 @sharded 0
+setblock block @dp-10j-01-tank-mounting-bay 60 36 @sharded 0
+setblock block @dp-10j-02-support-mounting-bay 67 36 @sharded 0
+setblock block @dp-10j-03-hover-mounting-bay 74 36 @sharded 0
+setblock block @dp-10j-12-progressive-component-assembler 81 36 @sharded 0
+setblock block @dp-10j-13-cumulative-component-assembler 88 36 @sharded 0
+setblock block @dp-11k-03-core-omphalos 95 36 @sharded 0
+setblock block @dp-11k-06-core-summit 102 36 @sharded 0
+setblock block @dp-ample-monolith 110 37 @sharded 0
+setblock block @dp-arcane-monolith 119 37 @sharded 0
+setblock block @dp-primal-monolith 128 37 @sharded 0
+spawn @dp-16a-01-parave 12 51 90 @sharded outUnit
+spawn @dp-16p-01-luminary 17 51 90 @sharded outUnit
+spawn @dp-17q-01-zeta 22 51 90 @sharded outUnit
+spawn @dp-18r-01-alveus 27 51 90 @sharded outUnit
+spawn @dp-16a-02-teraze 32 51 90 @sharded outUnit
+spawn @dp-24x-01-cortex 37 51 90 @sharded outUnit
+spawn @dp-14n-01-shiv 42 51 90 @sharded outUnit
+spawn @dp-17q-04-erpode 47 51 90 @sharded outUnit
+spawn @dp-18r-12-mounting-drone 52 51 90 @sharded outUnit
+spawn @dp-arcana-blob 57 51 90 @sharded outUnit
+spawn @dp-rupturing-shockwave 62 51 90 @sharded outUnit
+spawn @dp-14n-02-bayonet 67 51 90 @sharded outUnit
+spawn @dp-16p-02-enlighten 72 51 90 @sharded outUnit
+spawn @dp-17q-02-theta 77 51 90 @sharded outUnit
+spawn @dp-15o-01-shennong 82 51 90 @sharded outUnit
+spawn @dp-arcana-moth 87 51 90 @sharded outUnit
+spawn @dp-14n-03-cleaver 92 51 90 @sharded outUnit
+spawn @dp-16a-03-decredence 97 51 90 @sharded outUnit
+spawn @dp-16p-03-illuminate 102 51 90 @sharded outUnit
+spawn @dp-17q-05-hirude 107 51 90 @sharded outUnit
+spawn @dp-17q-03-iota 112 51 90 @sharded outUnit
+spawn @dp-barite-crawler 117 51 90 @sharded outUnit
+spawn @dp-17q-06-clitelle 122 51 90 @sharded outUnit
+spawn @dp-15o-02-trigon 128 51 90 @sharded outUnit
+spawn @dp-16a-04-tequant 134 51 90 @sharded outUnit
+spawn @dp-arcana-raynoid 140 51 90 @sharded outUnit
+spawn @dp-14n-04-apex 146 51 90 @sharded outUnit
+spawn @dp-16p-04-elucidate 152 51 90 @sharded outUnit
+spawn @dp-15o-03-aprotodon 158 51 90 @sharded outUnit
+spawn @dp-barite-stalker 164 51 90 @sharded outUnit
+spawn @dp-16p-05-expound 171 52 90 @sharded outUnit
+spawn @dp-barite-scourge 178 52 90 @sharded outUnit
+spawn @dp-15o-04-aphelops 185 52 90 @sharded outUnit
+spawn @dp-14n-05-crest 13 60 90 @sharded outUnit
+spawn @dp-15o-05-annectodon 20 60 90 @sharded outUnit
+spawn @dp-16a-05-everse 27 60 90 @sharded outUnit
+spawn @dp-barite-elder 34 60 90 @sharded outUnit
+done:
+stop
